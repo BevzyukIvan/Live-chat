@@ -40,13 +40,13 @@ public class TelegramTopicStore {
     }
 
     private final Cache<String, TopicSession> byCid = Caffeine.newBuilder()
-            .expireAfterAccess(Duration.ofHours(24))
+            .expireAfterAccess(Duration.ofHours(1))
             .maximumSize(1_000)
             .scheduler(com.github.benmanes.caffeine.cache.Scheduler.systemScheduler())
             .build();
 
     private final Cache<Long, String> cidByThread = Caffeine.newBuilder()
-            .expireAfterAccess(Duration.ofHours(24))
+            .expireAfterAccess(Duration.ofHours(1))
             .maximumSize(1_000)
             .scheduler(com.github.benmanes.caffeine.cache.Scheduler.systemScheduler())
             .build();
