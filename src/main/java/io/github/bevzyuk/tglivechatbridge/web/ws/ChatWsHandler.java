@@ -45,7 +45,7 @@ public class ChatWsHandler implements WebSocketHandler {
                     }
                 });
 
-        Flux<String> heartbeat = Flux.interval(Duration.ofSeconds(25))
+        Flux<String> heartbeat = Flux.interval(Duration.ofSeconds(45))
                 .map(t -> {
                     try {
                         return om.writeValueAsString(WsOutboundMessage.keepAlive());
