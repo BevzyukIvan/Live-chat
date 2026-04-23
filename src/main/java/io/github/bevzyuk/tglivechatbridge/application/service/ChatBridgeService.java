@@ -1,6 +1,7 @@
 package io.github.bevzyuk.tglivechatbridge.application.service;
 
 import io.github.bevzyuk.tglivechatbridge.application.dto.ChatSendRequest;
+import io.github.bevzyuk.tglivechatbridge.application.dto.ChatSendResponse;
 import io.github.bevzyuk.tglivechatbridge.application.dto.WsOutboundMessage;
 import io.github.bevzyuk.tglivechatbridge.infrastructure.store.SessionRegistry;
 import io.github.bevzyuk.tglivechatbridge.infrastructure.store.TelegramTopicStore;
@@ -24,8 +25,8 @@ public class ChatBridgeService {
         this.sessions = sessions;
     }
 
-    public Mono<Void> fromSite(ChatSendRequest req) {
-        var ts = topicStore.getOrCreate(req.cid(), req.clientName());
+    public Mono<ChatSendResponse> fromSite(ChatSendRequest req) {
+        var ts = topicStore.getOrCreate(req.cid(), req.clientName(), req.threadId());
 
         Mono<Long> ensureThreadMono = (ts.threadId() != null)
                 ? Mono.just(ts.threadId())
@@ -33,7 +34,8 @@ public class ChatBridgeService {
                 .doOnNext(threadId -> topicStore.bindThread(req.cid(), threadId));
 
         return ensureThreadMono
-                .flatMap(threadId -> telegram.sendMessage(buildAdminText(req, ts.shortCode()), threadId));
+                .flatMap(threadId -> telegram.sendMessage(buildAdminText(req), threadId)
+                        .thenReturn(new ChatSendResponse(req.cid(), threadId)));
     }
 
     public Mono<Void> fromTelegram(TelegramUpdate upd) {
@@ -63,13 +65,12 @@ public class ChatBridgeService {
         return s.length() > 40 ? s.substring(0, 40) : s;
     }
 
-    private String buildAdminText(ChatSendRequest req, String shortCode) {
+    private String buildAdminText(ChatSendRequest req) {
         String client = safeName(req.clientName());
 
         StringBuilder sb = new StringBuilder();
         sb.append("🟦 Повідомлення з сайту\n");
-        sb.append("Клієнт: ").append(client == null ? "Невідомо" : client)
-                .append(" #").append(shortCode).append("\n\n");
+        sb.append("Клієнт: ").append(client == null ? "Невідомо" : client).append("\n\n");
         sb.append(req.text());
 
         return sb.toString();

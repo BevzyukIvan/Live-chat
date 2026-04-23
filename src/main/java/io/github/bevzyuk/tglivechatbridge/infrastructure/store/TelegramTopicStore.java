@@ -2,6 +2,7 @@ package io.github.bevzyuk.tglivechatbridge.infrastructure.store;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import lombok.Setter;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
@@ -15,6 +16,7 @@ public class TelegramTopicStore {
         private final String cid;
         private final String shortCode;
         private volatile String clientName;
+        @Setter
         private volatile Long threadId;
 
         public TopicSession(String cid, String shortCode, String clientName) {
@@ -34,26 +36,30 @@ public class TelegramTopicStore {
             }
         }
 
-        public void setThreadId(Long threadId) {
-            this.threadId = threadId;
-        }
     }
 
     private final Cache<String, TopicSession> byCid = Caffeine.newBuilder()
-            .expireAfterAccess(Duration.ofHours(1))
+            .expireAfterAccess(Duration.ofHours(12))
             .maximumSize(1_000)
             .scheduler(com.github.benmanes.caffeine.cache.Scheduler.systemScheduler())
             .build();
 
     private final Cache<Long, String> cidByThread = Caffeine.newBuilder()
-            .expireAfterAccess(Duration.ofHours(1))
+            .expireAfterAccess(Duration.ofHours(12))
             .maximumSize(1_000)
             .scheduler(com.github.benmanes.caffeine.cache.Scheduler.systemScheduler())
             .build();
 
-    public TopicSession getOrCreate(String cid, String clientName) {
-        TopicSession s = byCid.get(cid, key ->
-                new TopicSession(key, newShortCode(), normalizeName(clientName)));
+    public TopicSession getOrCreate(String cid, String clientName, Long requestedThreadId) {
+        String normalizedName = normalizeName(clientName);
+
+        TopicSession s = byCid.get(cid, key -> {
+            TopicSession created = new TopicSession(key, newShortCode(), normalizedName);
+            if (requestedThreadId != null) {
+                created.setThreadId(requestedThreadId);
+            }
+            return created;
+        });
 
         Long tid = s.threadId();
         if (tid != null) {
@@ -74,9 +80,9 @@ public class TelegramTopicStore {
     public String findCidByThreadId(Long threadId) {
         if (threadId == null) return null;
         String cid = cidByThread.getIfPresent(threadId);
-        if (cid != null) {
-            byCid.getIfPresent(cid);
-        }
+//        if (cid != null) {
+//            byCid.getIfPresent(cid);
+//        }
         return cid;
     }
 
