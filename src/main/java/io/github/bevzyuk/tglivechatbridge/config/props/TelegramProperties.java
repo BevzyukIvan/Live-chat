@@ -9,5 +9,6 @@ public record TelegramProperties(
         String botToken,
         long adminChatId,
         String webhookSecret,
-        Duration linkTtl
+        Duration linkTtl,
+        Duration offlineDeliveryGrace
 ) { }

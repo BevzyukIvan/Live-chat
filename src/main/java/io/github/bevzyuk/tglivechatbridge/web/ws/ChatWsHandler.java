@@ -2,8 +2,8 @@ package io.github.bevzyuk.tglivechatbridge.web.ws;
 
 
 import io.github.bevzyuk.tglivechatbridge.application.dto.WsOutboundMessage;
+import io.github.bevzyuk.tglivechatbridge.application.service.PendingAdminDeliveryService;
 import io.github.bevzyuk.tglivechatbridge.infrastructure.store.SessionRegistry;
-import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.socket.WebSocketHandler;
 import org.springframework.web.reactive.socket.WebSocketSession;
@@ -18,10 +18,14 @@ import java.time.Duration;
 public class ChatWsHandler implements WebSocketHandler {
 
     private final SessionRegistry sessions;
+    private final PendingAdminDeliveryService pendingAdminDelivery;
     private final ObjectMapper om;
 
-    public ChatWsHandler(SessionRegistry sessions, ObjectMapper om) {
+    public ChatWsHandler(SessionRegistry sessions,
+                         PendingAdminDeliveryService pendingAdminDelivery,
+                         ObjectMapper om) {
         this.sessions = sessions;
+        this.pendingAdminDelivery = pendingAdminDelivery;
         this.om = om;
     }
 
@@ -37,6 +41,9 @@ public class ChatWsHandler implements WebSocketHandler {
         }
 
         Flux<String> outbound = sessions.connect(cid)
+                .doOnSubscribe(subscription ->
+                        pendingAdminDelivery.flushWhenClientConnected(cid).subscribe()
+                )
                 .map(msg -> {
                     try {
                         return om.writeValueAsString(msg);
@@ -45,22 +52,27 @@ public class ChatWsHandler implements WebSocketHandler {
                     }
                 });
 
+        String heartbeatJson = createHeartbeatJson();
+
         Flux<String> heartbeat = Flux.interval(Duration.ofSeconds(45))
-                .map(t -> {
-                    try {
-                        return om.writeValueAsString(WsOutboundMessage.keepAlive());
-                    } catch (Exception e) {
-                        return "{\"type\":\"KEEPALIVE\",\"text\":\"\"}";
-                    }
-                });
+                .map(t -> heartbeatJson);
 
         Mono<Void> inbound = session.receive().then();
 
         Mono<Void> send = session.send(
-                Flux.merge(outbound, heartbeat).map(session::textMessage)
+                Flux.merge(outbound, heartbeat)
+                        .map(session::textMessage)
         );
 
         return Mono.when(inbound, send)
                 .doFinally(sig -> sessions.disconnect(cid));
+    }
+
+    private String createHeartbeatJson() {
+        try {
+            return om.writeValueAsString(WsOutboundMessage.keepAlive());
+        } catch (Exception e) {
+            return "{\"type\":\"KEEPALIVE\",\"text\":\"\"}";
+        }
     }
 }

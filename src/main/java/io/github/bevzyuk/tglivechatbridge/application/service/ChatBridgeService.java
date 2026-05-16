@@ -2,8 +2,6 @@ package io.github.bevzyuk.tglivechatbridge.application.service;
 
 import io.github.bevzyuk.tglivechatbridge.application.dto.ChatSendRequest;
 import io.github.bevzyuk.tglivechatbridge.application.dto.ChatSendResponse;
-import io.github.bevzyuk.tglivechatbridge.application.dto.WsOutboundMessage;
-import io.github.bevzyuk.tglivechatbridge.infrastructure.store.SessionRegistry;
 import io.github.bevzyuk.tglivechatbridge.infrastructure.store.TelegramTopicStore;
 import io.github.bevzyuk.tglivechatbridge.infrastructure.telegram.TelegramClient;
 import io.github.bevzyuk.tglivechatbridge.web.telegram.dto.TelegramUpdate;
@@ -15,14 +13,14 @@ public class ChatBridgeService {
 
     private final TelegramClient telegram;
     private final TelegramTopicStore topicStore;
-    private final SessionRegistry sessions;
+    private final PendingAdminDeliveryService pendingAdminDelivery;
 
     public ChatBridgeService(TelegramClient telegram,
                              TelegramTopicStore topicStore,
-                             SessionRegistry sessions) {
+                             PendingAdminDeliveryService pendingAdminDelivery) {
         this.telegram = telegram;
         this.topicStore = topicStore;
-        this.sessions = sessions;
+        this.pendingAdminDelivery = pendingAdminDelivery;
     }
 
     public Mono<ChatSendResponse> fromSite(ChatSendRequest req) {
@@ -49,8 +47,7 @@ public class ChatBridgeService {
         String text = msg.text();
         if (text == null || text.isBlank()) return Mono.empty();
 
-        sessions.emit(cid, WsOutboundMessage.msg(text.trim()));
-        return Mono.empty();
+        return pendingAdminDelivery.deliverOrQueue(cid, msg.messageThreadId(), text.trim());
     }
 
     private String buildTopicTitle(TelegramTopicStore.TopicSession ts) {

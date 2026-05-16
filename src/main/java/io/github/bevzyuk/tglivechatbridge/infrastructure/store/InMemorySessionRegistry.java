@@ -22,6 +22,7 @@ public class InMemorySessionRegistry implements SessionRegistry {
     private static final class Entry {
         final Sinks.Many<WsOutboundMessage> sink;
         final AtomicInteger connections = new AtomicInteger(0);
+        final Object emitLock = new Object();
 
         Entry() {
             this.sink = Sinks.many().multicast().onBackpressureBuffer(BACKPRESSURE_BUFFER);
@@ -32,34 +33,31 @@ public class InMemorySessionRegistry implements SessionRegistry {
 
     @Override
     public Flux<WsOutboundMessage> connect(String cid) {
-        AtomicReference<Entry> ref = new AtomicReference<>();
-
-        sessions.compute(cid, (key, existing) -> {
-            Entry e = (existing != null) ? existing : new Entry();
-            e.connections.incrementAndGet();
-            ref.set(e);
-            return e;
-        });
-
-        Entry e = ref.get();
-        if (e == null) {
-            return Flux.error(new IllegalStateException("Session entry was not created for cid=" + cid));
+        if (cid == null || cid.isBlank()) {
+            return Flux.error(new IllegalArgumentException("cid must not be blank"));
         }
+
+        Entry e = sessions.compute(cid, (key, existing) -> {
+            Entry entry = (existing != null) ? existing : new Entry();
+            entry.connections.incrementAndGet();
+            return entry;
+        });
 
         return e.sink.asFlux();
     }
 
     @Override
     public void disconnect(String cid) {
+        if (cid == null || cid.isBlank()) {
+            return;
+        }
+
         AtomicReference<Entry> toComplete = new AtomicReference<>();
 
         sessions.computeIfPresent(cid, (key, e) -> {
             int left = e.connections.decrementAndGet();
 
             if (left <= 0) {
-                if (left < 0) {
-                    log.warn("connections < 0 for cid={}, left={}", cid, left);
-                }
                 toComplete.set(e);
                 return null;
             }
@@ -69,24 +67,39 @@ public class InMemorySessionRegistry implements SessionRegistry {
 
         Entry e = toComplete.get();
         if (e != null) {
-            Sinks.EmitResult r = e.sink.tryEmitComplete();
-            if (r.isFailure()
-                    && r != Sinks.EmitResult.FAIL_TERMINATED
-                    && r != Sinks.EmitResult.FAIL_CANCELLED) {
-                log.debug("sink.complete failed for cid={}, result={}", cid, r);
+            synchronized (e.emitLock) {
+                Sinks.EmitResult r = e.sink.tryEmitComplete();
+
+                if (!r.isSuccess()
+                        && r != Sinks.EmitResult.FAIL_TERMINATED
+                        && r != Sinks.EmitResult.FAIL_CANCELLED) {
+                    log.debug("sink.complete failed for cid={}, result={}", cid, r);
+                }
             }
         }
     }
 
     @Override
-    public void emit(String cid, WsOutboundMessage msg) {
-        Entry e = sessions.get(cid);
-        if (e == null) {
-            return;
+    public boolean emit(String cid, WsOutboundMessage msg) {
+        if (cid == null || cid.isBlank() || msg == null) {
+            return false;
         }
 
-        Sinks.EmitResult r = e.sink.tryEmitNext(msg);
-        if (r.isFailure()) {
+        Entry e = sessions.get(cid);
+        if (e == null) {
+            return false;
+        }
+
+        synchronized (e.emitLock) {
+            if (sessions.get(cid) != e || e.connections.get() <= 0) {
+                return false;
+            }
+
+            Sinks.EmitResult r = e.sink.tryEmitNext(msg);
+            if (r.isSuccess()) {
+                return true;
+            }
+
             if (r == Sinks.EmitResult.FAIL_TERMINATED || r == Sinks.EmitResult.FAIL_CANCELLED) {
                 sessions.remove(cid, e);
             }
@@ -94,7 +107,19 @@ public class InMemorySessionRegistry implements SessionRegistry {
             if (r != Sinks.EmitResult.FAIL_ZERO_SUBSCRIBER) {
                 log.debug("sink.emit failed for cid={}, result={}", cid, r);
             }
+
+            return false;
         }
+    }
+
+    @Override
+    public boolean isOnline(String cid) {
+        if (cid == null || cid.isBlank()) {
+            return false;
+        }
+
+        Entry e = sessions.get(cid);
+        return e != null && e.connections.get() > 0;
     }
 
     public int activeCidCount() {
