@@ -28,14 +28,17 @@ public class PendingAdminDeliveryService {
 
     private final SessionRegistry sessions;
     private final TelegramClient telegram;
+    private final AdminMessageReceiptService receipts;
     private final Duration offlineDeliveryGrace;
     private final Map<String, PendingBatch> pendingByCid = new ConcurrentHashMap<>();
 
     public PendingAdminDeliveryService(SessionRegistry sessions,
                                        TelegramClient telegram,
-                                       TelegramProperties props) {
+                                       TelegramProperties props,
+                                       AdminMessageReceiptService receipts) {
         this.sessions = sessions;
         this.telegram = telegram;
+        this.receipts = receipts;
         this.offlineDeliveryGrace = normalizeGrace(props.offlineDeliveryGrace());
     }
 
@@ -45,16 +48,31 @@ public class PendingAdminDeliveryService {
             return Mono.empty();
         }
 
-        boolean delivered = sessions.emit(cid, WsOutboundMessage.msg(normalizedText));
-        if (delivered) {
+        PendingAdminMessage message = new PendingAdminMessage(
+                receipts.register(cid, threadId, normalizedText),
+                normalizedText,
+                threadId
+        );
+
+        boolean acceptedBySocket = sessions.emit(
+                cid,
+                WsOutboundMessage.msg(message.messageId(), message.text(), message.threadId())
+        );
+
+        if (acceptedBySocket) {
             return Mono.empty();
         }
 
+        AtomicBoolean stored = new AtomicBoolean(false);
         PendingBatch batch = pendingByCid.compute(cid, (key, existing) -> {
             PendingBatch target = existing != null ? existing : new PendingBatch(threadId);
-            target.add(normalizedText);
+            stored.set(target.add(message));
             return target;
         });
+
+        if (!stored.get()) {
+            receipts.forget(message.messageId());
+        }
 
         if (batch.markTimerStarted()) {
             scheduleExpiration(cid, batch);
@@ -87,14 +105,20 @@ public class PendingAdminDeliveryService {
             return notifyAboutDroppedMessagesIfNeeded(snapshot, batch.threadId());
         }
 
-        int delivered = 0;
-        for (String message : snapshot.messages()) {
-            if (sessions.emit(cid, WsOutboundMessage.msg(message))) {
-                delivered++;
+        int acceptedBySocket = 0;
+        List<PendingAdminMessage> failedMessages = new ArrayList<>();
+
+        for (PendingAdminMessage message : snapshot.messages()) {
+            if (sessions.emit(cid, WsOutboundMessage.msg(message.messageId(), message.text(), message.threadId()))) {
+                acceptedBySocket++;
+            } else {
+                failedMessages.add(message);
             }
         }
 
-        int failed = snapshot.messages().size() - delivered + snapshot.droppedMessages();
+        forgetReceipts(failedMessages);
+
+        int failed = snapshot.messages().size() - acceptedBySocket + snapshot.droppedMessages();
         if (failed <= 0) {
             return Mono.empty();
         }
@@ -122,14 +146,20 @@ public class PendingAdminDeliveryService {
         }
 
         if (sessions.isOnline(cid)) {
-            int delivered = 0;
-            for (String message : snapshot.messages()) {
-                if (sessions.emit(cid, WsOutboundMessage.msg(message))) {
-                    delivered++;
+            int acceptedBySocket = 0;
+            List<PendingAdminMessage> failedMessages = new ArrayList<>();
+
+            for (PendingAdminMessage message : snapshot.messages()) {
+                if (sessions.emit(cid, WsOutboundMessage.msg(message.messageId(), message.text(), message.threadId()))) {
+                    acceptedBySocket++;
+                } else {
+                    failedMessages.add(message);
                 }
             }
 
-            int failed = snapshot.messages().size() - delivered + snapshot.droppedMessages();
+            forgetReceipts(failedMessages);
+
+            int failed = snapshot.messages().size() - acceptedBySocket + snapshot.droppedMessages();
             if (failed <= 0) {
                 return Mono.empty();
             }
@@ -137,10 +167,18 @@ public class PendingAdminDeliveryService {
             return telegram.sendMessage(buildNotDeliveredText(failed), batch.threadId());
         }
 
+        forgetReceipts(snapshot.messages());
+
         return telegram.sendMessage(
                 buildNotDeliveredText(snapshot.messages().size() + snapshot.droppedMessages()),
                 batch.threadId()
         );
+    }
+
+    private void forgetReceipts(List<PendingAdminMessage> messages) {
+        for (PendingAdminMessage message : messages) {
+            receipts.forget(message.messageId());
+        }
     }
 
     private Mono<Void> notifyAboutDroppedMessagesIfNeeded(PendingSnapshot snapshot, long threadId) {
@@ -183,11 +221,13 @@ public class PendingAdminDeliveryService {
         return value;
     }
 
-    private record PendingSnapshot(List<String> messages, int droppedMessages) { }
+    private record PendingAdminMessage(String messageId, String text, long threadId) { }
+
+    private record PendingSnapshot(List<PendingAdminMessage> messages, int droppedMessages) { }
 
     private static final class PendingBatch {
         private final long threadId;
-        private final List<String> messages = new ArrayList<>();
+        private final List<PendingAdminMessage> messages = new ArrayList<>();
         private final AtomicBoolean timerStarted = new AtomicBoolean(false);
         private int droppedMessages;
 
@@ -199,19 +239,20 @@ public class PendingAdminDeliveryService {
             return threadId;
         }
 
-        synchronized void add(String message) {
+        synchronized boolean add(PendingAdminMessage message) {
             Objects.requireNonNull(message, "message");
 
             if (messages.size() >= MAX_PENDING_MESSAGES_PER_CID) {
                 droppedMessages++;
-                return;
+                return false;
             }
 
             messages.add(message);
+            return true;
         }
 
         synchronized PendingSnapshot snapshot() {
-            return new PendingSnapshot(new ArrayList<>(messages), droppedMessages);
+            return new PendingSnapshot(List.copyOf(messages), droppedMessages);
         }
 
         boolean markTimerStarted() {
